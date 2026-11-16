@@ -9,7 +9,7 @@ import jax.tree_util as jtu
 import numpy as np
 from numpy.typing import NDArray
 
-from ._pql_gcv import _vmap_symm_mult, _vmap_trace, _vmap_where
+from ._pql_gcv import _vmap_symm_mult, _vmap_where
 from ._utils import singular_value_keep_mask
 from .penalty_utils import prepend_zeros_for_intercept
 
@@ -147,7 +147,9 @@ def _reml_grad_blocks_sliced(penalty_tree, apply_identifiability, comp, comp_y1,
     def _per_term(pen, comp_slice, comp_y1_slice, lam):
         # pen (k,q,q)  comp_slice (q,m)  comp_y1_slice (q,)  lam (k,) -> (k,),(k,)
         rss = lam * _vmap_symm_mult(pen, comp_y1_slice)
-        ld = lam * _vmap_trace(_vmap_symm_mult(pen, comp_slice))
+        # Only the trace is needed. Avoid forming a (k, m, m) product.
+        pen_comp = jnp.matmul(pen, comp_slice, precision=jax.lax.Precision.HIGHEST)
+        ld = lam * jnp.sum(comp_slice[None] * pen_comp, axis=(-2, -1))
         return rss, ld
 
     rss_out: list = [None] * n

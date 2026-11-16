@@ -10,7 +10,7 @@ from pgam_jax.penalty_utils import DROP_LAST_ROW_COL, IDENTITY
 
 
 @pytest.mark.parametrize("container", [list, tuple])
-@pytest.mark.parametrize("n_columns", [3, 13])
+@pytest.mark.parametrize("n_columns", [1, 3, 13])
 @pytest.mark.parametrize("mixed_identifiability", [False, True])
 def test_reml_blocks_match_dense(container, n_columns, mixed_identifiability):
     """Check grouping, offsets, multiple penalties, and the returned tree."""
