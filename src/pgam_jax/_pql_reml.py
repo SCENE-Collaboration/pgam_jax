@@ -1,3 +1,4 @@
+from collections import defaultdict
 from collections.abc import Callable
 from functools import partial
 from typing import Any
@@ -5,11 +6,12 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
+import numpy as np
 from numpy.typing import NDArray
 
 from ._pql_gcv import _vmap_symm_mult, _vmap_trace, _vmap_where
 from ._utils import singular_value_keep_mask
-from .penalty_utils import compute_penalty_blocks, prepend_zeros_for_intercept
+from .penalty_utils import prepend_zeros_for_intercept
 
 
 @partial(
@@ -107,6 +109,65 @@ def _compute_reml_and_states(
     return reml_val, RSS_reml, log_det_XtXpSl, y1, s_inv, V_T, log_det_sl_grads, n_obs
 
 
+def _reml_grad_blocks_sliced(penalty_tree, apply_identifiability, comp, comp_y1, lams):
+    """
+    Compute gradient contributions using term-local penalties grouped by shape.
+
+    A smooth term's penalty ``S_j`` is nonzero only on that term's own columns,
+    so ``comp.T @ S_j @ comp`` depends only on the few rows of ``comp`` for that
+    term. We slice ``comp`` to each term's columns, multiply by the SMALL
+    ``(q_j, q_j)`` penalty, then stack all same-shaped terms and ``vmap`` -- one
+    batched op per distinct penalty shape (e.g. one for all the 6x6 coupling
+    terms) instead of one full-size matmul per term. The dropped off-block
+    entries are structurally zero, so slicing preserves the algebra. Floating-point
+    reduction order can differ. Grouping and offsets use only static shapes.
+    """
+    penalty_flat, structure = jtu.tree_flatten(penalty_tree)
+    if isinstance(apply_identifiability, (list, tuple)):
+        scaled = [
+            fn(p) for fn, p in zip(apply_identifiability, penalty_flat, strict=True)
+        ]
+    else:
+        scaled = [apply_identifiability(p) for p in penalty_flat]
+    lams = jtu.tree_leaves(lams)
+
+    n = len(scaled)
+    # diagonal column offset of each block in the intercept-shifted coef space
+    offsets = []
+    acc = 1  # shift_by=1 skips the unpenalized intercept column
+    for sp in scaled:
+        offsets.append(acc)
+        acc += int(sp.shape[-1])
+
+    # group terms by (n_penalties_per_term, block_size) -> one vmap per group
+    groups: dict = defaultdict(list)
+    for j, sp in enumerate(scaled):
+        groups[(int(sp.shape[0]), int(sp.shape[-1]))].append(j)
+
+    def _per_term(pen, comp_slice, comp_y1_slice, lam):
+        # pen (k,q,q)  comp_slice (q,m)  comp_y1_slice (q,)  lam (k,) -> (k,),(k,)
+        rss = lam * _vmap_symm_mult(pen, comp_y1_slice)
+        ld = lam * _vmap_trace(_vmap_symm_mult(pen, comp_slice))
+        return rss, ld
+
+    rss_out: list = [None] * n
+    ld_out: list = [None] * n
+    for (_k, q), members in groups.items():
+        rows = np.stack([np.arange(offsets[j], offsets[j] + q) for j in members])
+        comp_g = comp[rows]  # (G, q, m)
+        comp_y1_g = comp_y1[rows]  # (G, q)
+        pen_g = jnp.stack([scaled[j] for j in members])  # (G, k, q, q)
+        lam_g = jnp.stack([lams[j] for j in members])  # (G, k)
+        rss_b, ld_b = jax.vmap(_per_term)(pen_g, comp_g, comp_y1_g, lam_g)
+        for i, j in enumerate(members):
+            rss_out[j] = rss_b[i]
+            ld_out[j] = ld_b[i]
+    return (
+        jtu.tree_unflatten(structure, rss_out),
+        jtu.tree_unflatten(structure, ld_out),
+    )
+
+
 @partial(
     jax.jit,
     static_argnames=("apply_identifiability",),
@@ -135,26 +196,9 @@ def _reml_grad_compute_from_states(
     comp = V_T.T * s_inv  # (n_features, k)
     comp_y1 = comp @ y1.ravel()  # (n_features,)
 
-    blocks = compute_penalty_blocks(
-        penalty_tree,
-        apply_identifiability=apply_identifiability,
-        shift_by=1,
-    )
-
     lams = jtu.tree_map(jnp.exp, regularization_strength)
-
-    # lam_j * (comp @ y1)^T Sj (comp @ y1)
-    rss_grad = jtu.tree_map(
-        lambda s_block, lam: lam * _vmap_symm_mult(s_block, comp_y1),
-        blocks,
-        lams,
-    )
-
-    # lam_j * tr(Mj) = lam_j * tr(comp^T Sj comp)
-    logdet_xtx_grad = jtu.tree_map(
-        lambda s_block, lam: lam * _vmap_trace(_vmap_symm_mult(s_block, comp)),
-        blocks,
-        lams,
+    rss_grad, logdet_xtx_grad = _reml_grad_blocks_sliced(
+        penalty_tree, apply_identifiability, comp, comp_y1, lams
     )
 
     return jtu.tree_map(
