@@ -9,7 +9,7 @@ import jax.tree_util as jtu
 import numpy as np
 from numpy.typing import NDArray
 
-from ._pql_gcv import _vmap_symm_mult, _vmap_where
+from ._pql_gcv import _vmap_where
 from ._utils import singular_value_keep_mask
 from .penalty_utils import prepend_zeros_for_intercept
 
@@ -146,12 +146,13 @@ def _reml_grad_blocks_sliced(penalty_tree, apply_identifiability, comp, comp_y1,
 
     def _per_term(pen, comp_slice, comp_y1_slice, lam):
         # pen (k,q,q)  comp_slice (q,m)  comp_y1_slice (q,)  lam (k,) -> (k,),(k,)
-        rss = lam * _vmap_symm_mult(pen, comp_y1_slice)
-        # Reuse the local covariance block across this term's penalties.
         hi = jax.lax.Precision.HIGHEST
-        covariance = jnp.matmul(comp_slice, comp_slice.T, precision=hi)
-        penalties_flat = pen.reshape(pen.shape[0], -1)
-        ld = lam * jnp.matmul(penalties_flat, covariance.ravel(), precision=hi)
+        rss = lam * jnp.einsum(
+            "kij,i,j->k", pen, comp_y1_slice, comp_y1_slice, precision=hi
+        )
+        # Reuse the local covariance block across this term's penalties.
+        covariance = jnp.einsum("im,jm->ij", comp_slice, comp_slice, precision=hi)
+        ld = lam * jnp.einsum("kij,ij->k", pen, covariance, precision=hi)
         return rss, ld
 
     rss_out: list = [None] * n
