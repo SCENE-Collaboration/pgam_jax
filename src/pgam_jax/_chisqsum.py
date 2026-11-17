@@ -713,7 +713,7 @@ def _cross_check(
             f"weights={weights.tolist()}, df={df.tolist()}, "
             f"noncentrality={noncentrality.tolist()}.\n\n"
             "PLEASE REPORT THIS CASE ON GITHUB:\n"
-            "https://github.com/bagibence/pgam_jax/issues/new"
+            "https://github.com/SCENE-Collaboration/pgam_jax/issues/new"
         )
 
 
@@ -783,7 +783,7 @@ def _cdf_approx(
                 f"noncentrality={noncentrality.tolist()}, where z and the "
                 f"weights are divided by the standard deviation of Q.\n\n"
                 "PLEASE REPORT THIS CASE ON GITHUB:\n"
-                "https://github.com/bagibence/pgam_jax/issues/new"
+                "https://github.com/SCENE-Collaboration/pgam_jax/issues/new"
             ) from fallback_failure
 
 

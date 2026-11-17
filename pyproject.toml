@@ -6,8 +6,9 @@ build-backend = "setuptools.build_meta"
 name = "pgam_jax"
 version = "0.1.0a0"
 authors = [
-    {name = "Edoardo Balzani"},
     {name = "Bence Bagi"},
+    {name = "Edoardo Balzani"},
+    {name = "Cristina Savin"},
 ]
 description = "JAX-based Poisson generalized additive models for neuroscience workflows."
 readme = "README.md"

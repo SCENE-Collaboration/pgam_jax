@@ -1,0 +1,48 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using the metadata from this file."
+title: "pgam_jax"
+abstract: "JAX-based Poisson generalized additive models for neuroscience workflows."
+type: software
+authors:
+  - family-names: Bagi
+    given-names: Bence
+    orcid: "https://orcid.org/0000-0003-0849-7480"
+  - family-names: Balzani
+    given-names: Edoardo
+    orcid: "https://orcid.org/0000-0002-3702-5856"
+  - family-names: Savin
+    given-names: Cristina
+    orcid: "https://orcid.org/0000-0002-3414-8244"
+repository-code: "https://github.com/SCENE-Collaboration/pgam_jax"
+license: MIT
+keywords:
+  - neuroscience
+  - PGAM
+  - Poisson GAM
+  - generalized additive model
+  - spike counts modeling
+  - JAX
+  - statistical modeling
+references:
+  - type: conference-paper
+    title: "Efficient estimation of neural tuning during naturalistic behavior"
+    authors:
+      - family-names: Balzani
+        given-names: Edoardo
+        orcid: "https://orcid.org/0000-0002-3702-5856"
+      - family-names: Lakshminarasimhan
+        given-names: Kaushik
+      - family-names: Angelaki
+        given-names: Dora
+      - family-names: Savin
+        given-names: Cristina
+        orcid: "https://orcid.org/0000-0002-3414-8244"
+    collection-title: "Advances in Neural Information Processing Systems"
+    collection-type: proceedings
+    volume: 33
+    start: 12604
+    end: 12614
+    year: 2020
+    publisher:
+      name: "Curran Associates, Inc."
+    url: "https://proceedings.neurips.cc/paper_files/paper/2020/hash/94d2a3c6dd19337f2511cdf8b4bf907e-Abstract.html"
