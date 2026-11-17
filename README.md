@@ -24,7 +24,7 @@ If you have problems on native Windows, try [WSL](https://learn.microsoft.com/wi
 If you use [uv](https://docs.astral.sh/uv/), run this command in your project folder:
 
 ```bash
-uv add git+https://github.com/bagibence/pgam_jax.git
+uv add git+https://github.com/SCENE-Collaboration/pgam_jax.git
 ```
 
 Without uv, add `pgam_jax` to the `dependencies` list in your `pyproject.toml`:
@@ -32,7 +32,7 @@ Without uv, add `pgam_jax` to the `dependencies` list in your `pyproject.toml`:
 ```toml
 [project]
 dependencies = [
-    "pgam_jax @ git+https://github.com/bagibence/pgam_jax.git",
+    "pgam_jax @ git+https://github.com/SCENE-Collaboration/pgam_jax.git",
 ]
 ```
 
@@ -44,7 +44,7 @@ Activate your environment, then install with pip:
 
 ```bash
 conda activate my-analysis-env
-pip install git+https://github.com/bagibence/pgam_jax.git
+pip install git+https://github.com/SCENE-Collaboration/pgam_jax.git
 ```
 
 To make the environment reproducible, add `pgam_jax` to the `pip` section of your `environment.yml`:
@@ -54,7 +54,7 @@ dependencies:
   - python=3.12
   - pip
   - pip:
-      - git+https://github.com/bagibence/pgam_jax.git
+      - git+https://github.com/SCENE-Collaboration/pgam_jax.git
 ```
 
 ### Install from a local clone
@@ -64,7 +64,7 @@ Use a local clone to read or change the `pgam_jax` source code.
 Clone the repository:
 
 ```bash
-git clone https://github.com/bagibence/pgam_jax.git
+git clone https://github.com/SCENE-Collaboration/pgam_jax.git
 ```
 
 #### Projects with a `pyproject.toml`
