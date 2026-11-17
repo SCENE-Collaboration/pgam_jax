@@ -7,7 +7,6 @@ import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
 import numpy as np
-from jaxtyping import PyTree
 from numpy.typing import NDArray
 
 from ._pql_gcv import _vmap_where
@@ -116,26 +115,26 @@ def _compute_reml_and_states(
 
 
 def _reml_grad_blocks(
-    penalty_tree: PyTree[jax.Array],
+    penalty_tree: list[jax.Array],
     apply_identifiability: tuple[Callable, ...],
     cov_factor: jax.Array,
     beta_hat: jax.Array,
-    lams: PyTree[jax.Array],
-) -> tuple[PyTree[jax.Array], PyTree[jax.Array]]:
+    lams: list[jax.Array],
+) -> tuple[list[jax.Array], list[jax.Array]]:
     """
     Compute the RSS and log|X.T @ W @ X + S_lambda| contributions to the gradient, using per-term penalties.
 
     Parameters
     ----------
     penalty_tree
-        One leaf per smooth term, with shape (K_j, N_j, N_j). K_j is the
-        number of penalties for term j. After applying identifiability, each
-        leaf has shape (K_j, Q_j, Q_j). The term blocks are contiguous in
-        cov_factor, in leaf order, and start at row 1. Row 0 is the intercept.
+        List with one array per smooth term, with shape (K_j, N_j, N_j). K_j is
+        the number of penalties for term j. After applying identifiability, each
+        array has shape (K_j, Q_j, Q_j). The term blocks are contiguous in
+        cov_factor, in list order, and start at row 1. Row 0 is the intercept.
     apply_identifiability
-        Transform applied to each penalty leaf, for example dropping a row
-        and column to match a dropped design column. The tuple contains
-        one callable per leaf in the flattened order of penalty_tree.
+        Transform applied to each entry of penalty_tree, for example dropping a
+        row and column to match a dropped design column. The tuple contains one
+        callable per entry of penalty_tree, in the same order.
     cov_factor
         Shape (P, M). V_T.T * s_inv from _reml_grad_compute_from_states.
         The product cov_factor @ cov_factor.T is the numerically truncated pseudoinverse
@@ -147,17 +146,18 @@ def _reml_grad_blocks(
         Shape (P,). Fitted coefficient vector for the current weighted, penalized
         least-squares problem, computed as cov_factor @ y1.ravel().
     lams
-        Regularizer strengths, exp(rho), with one leaf of shape (K_j,) per term.
+        Regularizer strengths, exp(rho). List with one array of shape (K_j,) per
+        term, in the order of penalty_tree.
 
     Returns
     -------
     rss_grad
-        Same tree structure as penalty_tree, with leaves of shape (K_j,).
+        List with one array of shape (K_j,) per term, in the order of penalty_tree.
         Entry k for term j is lambda_jk * beta_hat_j.T @ S_jk @ beta_hat_j, where
         S_jk is penalty k of term j after apply_identifiability, with shape
         (Q_j, Q_j), and beta_hat_j is term j's slice of beta_hat.
     logdet_xtx_grad
-        Same tree structure as penalty_tree, with leaves of shape (K_j,).
+        List with one array of shape (K_j,) per term, in the order of penalty_tree.
         Entry k for term j is lambda_jk * trace(C_j.T @ S_jk @ C_j),
         where C_j is the term's row slice of cov_factor. The caller applies the
         factors of 0.5 to both returned contributions.
@@ -174,12 +174,16 @@ def _reml_grad_blocks(
     """
     if not isinstance(apply_identifiability, tuple):
         raise TypeError("apply_identifiability has to be a tuple")
+    if not isinstance(penalty_tree, list):
+        raise TypeError("penalty_tree has to be a list")
+    if not isinstance(lams, list):
+        raise TypeError("lams has to be a list")
+    if len(lams) != len(penalty_tree):
+        raise ValueError("lams has to have one entry per term in penalty_tree")
 
-    penalty_flat, structure = jtu.tree_flatten(penalty_tree)
     S_per_term = [
-        fn(p) for fn, p in zip(apply_identifiability, penalty_flat, strict=True)
+        fn(p) for fn, p in zip(apply_identifiability, penalty_tree, strict=True)
     ]
-    lams_per_term = jtu.tree_leaves(lams)
 
     # term j has coefficients term_boundaries[j] to term_boundaries[j + 1]. index 0 is the intercept.
     block_sizes = [p.shape[-1] for p in S_per_term]
@@ -215,7 +219,7 @@ def _reml_grad_blocks(
         group_C = cov_factor[group_coef_indices]  # (G, Q, M)
         group_beta_hat = beta_hat[group_coef_indices]  # (G, Q)
         group_S = jnp.stack([S_per_term[j] for j in member_indices])  # (G, K, Q, Q)
-        group_lams = jnp.stack([lams_per_term[j] for j in member_indices])  # (G, K)
+        group_lams = jnp.stack([lams[j] for j in member_indices])  # (G, K)
 
         group_rss_grads, group_logdet_xtx_grads = _per_group_grad(
             group_S, group_C, group_beta_hat, group_lams
@@ -228,10 +232,7 @@ def _reml_grad_blocks(
             rss_grad_leaves[j] = rss_grad
             logdet_xtx_grad_leaves[j] = logdet_xtx_grad
 
-    return (
-        jtu.tree_unflatten(structure, rss_grad_leaves),
-        jtu.tree_unflatten(structure, logdet_xtx_grad_leaves),
-    )
+    return rss_grad_leaves, logdet_xtx_grad_leaves
 
 
 @partial(
@@ -239,12 +240,12 @@ def _reml_grad_blocks(
     static_argnames=("apply_identifiability",),
 )
 def _reml_grad_compute_from_states(
-    regularization_strength: Any,
-    penalty_tree: Any,
+    regularization_strength: list[jax.Array],
+    penalty_tree: list[jax.Array],
     y1: jnp.ndarray,
     s_inv: jnp.ndarray,
     V_T: jnp.ndarray,
-    log_det_sl_grads: Any,
+    log_det_sl_grads: list[jax.Array],
     apply_identifiability: tuple[Callable, ...],
 ):
     """
