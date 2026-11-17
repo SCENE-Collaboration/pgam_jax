@@ -122,13 +122,11 @@ def _reml_grad_blocks_sliced(penalty_tree, apply_identifiability, comp, comp_y1,
     entries are structurally zero, so slicing preserves the algebra. Floating-point
     reduction order can differ. Grouping and offsets use only static shapes.
     """
+    if not isinstance(apply_identifiability, tuple):
+        raise TypeError("apply_identifiability has to be a tuple")
+
     penalty_flat, structure = jtu.tree_flatten(penalty_tree)
-    if isinstance(apply_identifiability, (list, tuple)):
-        scaled = [
-            fn(p) for fn, p in zip(apply_identifiability, penalty_flat, strict=True)
-        ]
-    else:
-        scaled = [apply_identifiability(p) for p in penalty_flat]
+    scaled = [fn(p) for fn, p in zip(apply_identifiability, penalty_flat, strict=True)]
     lams = jtu.tree_leaves(lams)
 
     n = len(scaled)
@@ -181,7 +179,7 @@ def _reml_grad_compute_from_states(
     s_inv: jnp.ndarray,
     V_T: jnp.ndarray,
     log_det_sl_grads: Any,
-    apply_identifiability: Callable | None,
+    apply_identifiability: tuple[Callable, ...],
 ):
     """
     Gradient of the REML objective w.r.t. regularization_strength.
@@ -211,11 +209,13 @@ def _reml_grad_compute_from_states(
     )
 
 
+# TODO: Remove apply_identifiability_columns. It is unused here and in
+# gcv_compute_factory. Callers: gam.py and tests/test_pql_reml.py.
 def reml_compute_factory(
     compute_sqrt: Callable,
     compute_log_det_and_grad: Callable,
-    apply_identifiability_columns: Callable | None,
-    apply_identifiability: Callable | None,
+    apply_identifiability_columns: tuple[Callable, ...],
+    apply_identifiability: tuple[Callable, ...],
 ):
     """
     Build a differentiable REML objective with a custom VJP.
