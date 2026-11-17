@@ -7,6 +7,7 @@ import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
 import numpy as np
+from jaxtyping import PyTree
 from numpy.typing import NDArray
 
 from ._pql_gcv import _vmap_where
@@ -63,11 +64,13 @@ def _compute_reml_and_states(
     log_det_XtXpSl :
         Scalar log|X'X + S_lam| (stored for diagnostics).
     y1 :
-        Shape (k, 1) — U1ᵀ Qᵀ y, needed for the RSS gradient.
+        Shape (M, 1). U1.T @ Q.T @ y, needed for beta_hat in the gradient.
+        M is the number of singular values of A = [R; sqrt_penalty].
     s_inv :
-        Shape (k,) — masked reciprocal singular values, needed for M_j.
+        Shape (M,). Masked reciprocal singular values, needed for cov_factor.
     V_T :
-        Shape (k, p) — right singular vectors, needed for M_j.
+        Shape (M, P). Right singular vectors of A, needed for cov_factor.
+        P is the number of coefficients, including the intercept.
     log_det_sl_grads :
         Pytree of per-block log|S_lam|_+ gradients (same structure as
         regularization_strength), computed alongside the log-det in the
@@ -93,7 +96,7 @@ def _compute_reml_and_states(
 
     # --- REML RSS = ||y||^2 - ||U1^T Q^T y||^2 ---
     y_obs = y[:n_obs].reshape(n_obs, -1)
-    y1 = U1.T @ (Q.T @ y_obs)  # (k, 1)
+    y1 = U1.T @ (Q.T @ y_obs)  # (M, 1)
     RSS_reml = jnp.sum(y_obs**2) - jnp.sum(y1**2)
 
     # --- log|X'X + S_lam| = 2 * sum log(s_k) over positive singular values ---
@@ -104,67 +107,130 @@ def _compute_reml_and_states(
     log_dets, log_det_sl_grads = compute_log_det_and_grad(regularization_strength)
     log_det_Sl = jtu.tree_reduce(lambda a, b: a + b, log_dets)
 
+    # TODO: Support fixed or estimated dispersion beyond the current Poisson case.
+    # Update this objective and its custom gradient together. For unknown
+    # dispersion, estimate it during smoothing selection, not only after fitting.
     reml_val = 0.5 * RSS_reml + 0.5 * log_det_XtXpSl - 0.5 * log_det_Sl
 
     return reml_val, RSS_reml, log_det_XtXpSl, y1, s_inv, V_T, log_det_sl_grads, n_obs
 
 
-def _reml_grad_blocks_sliced(penalty_tree, apply_identifiability, comp, comp_y1, lams):
+def _reml_grad_blocks(
+    penalty_tree: PyTree[jax.Array],
+    apply_identifiability: tuple[Callable, ...],
+    cov_factor: jax.Array,
+    beta_hat: jax.Array,
+    lams: PyTree[jax.Array],
+) -> tuple[PyTree[jax.Array], PyTree[jax.Array]]:
     """
-    Compute gradient contributions using term-local penalties grouped by shape.
+    Compute the RSS and log|X.T @ W @ X + S_lambda| contributions to the gradient, using per-term penalties.
 
-    A smooth term's penalty ``S_j`` is nonzero only on that term's own columns,
-    so ``comp.T @ S_j @ comp`` depends only on the few rows of ``comp`` for that
-    term. We slice ``comp`` to each term's columns, multiply by the SMALL
-    ``(q_j, q_j)`` penalty, then stack all same-shaped terms and ``vmap`` -- one
-    batched op per distinct penalty shape (e.g. one for all the 6x6 coupling
-    terms) instead of one full-size matmul per term. The dropped off-block
-    entries are structurally zero, so slicing preserves the algebra. Floating-point
-    reduction order can differ. Grouping and offsets use only static shapes.
+    Parameters
+    ----------
+    penalty_tree
+        One leaf per smooth term, with shape (K_j, N_j, N_j). K_j is the
+        number of penalties for term j. After applying identifiability, each
+        leaf has shape (K_j, Q_j, Q_j). The term blocks are contiguous in
+        cov_factor, in leaf order, and start at row 1. Row 0 is the intercept.
+    apply_identifiability
+        Transform applied to each penalty leaf, for example dropping a row
+        and column to match a dropped design column. The tuple contains
+        one callable per leaf in the flattened order of penalty_tree.
+    cov_factor
+        Shape (P, M). V_T.T * s_inv from _reml_grad_compute_from_states.
+        The product cov_factor @ cov_factor.T is the numerically truncated pseudoinverse
+        of X.T @ W @ X + S_lambda, with small singular directions dropped. With
+        scale phi = 1, it is the Bayesian posterior covariance of beta.
+        P is the total number of coefficients, including the intercept. M is
+        the number of singular directions returned by the thin SVD of [R; sqrt_penalty].
+    beta_hat
+        Shape (P,). Fitted coefficient vector for the current weighted, penalized
+        least-squares problem, computed as cov_factor @ y1.ravel().
+    lams
+        Regularizer strengths, exp(rho), with one leaf of shape (K_j,) per term.
+
+    Returns
+    -------
+    rss_grad
+        Same tree structure as penalty_tree, with leaves of shape (K_j,).
+        Entry k for term j is lambda_jk * beta_hat_j.T @ S_jk @ beta_hat_j, where
+        S_jk is penalty k of term j after apply_identifiability, with shape
+        (Q_j, Q_j), and beta_hat_j is term j's slice of beta_hat.
+    logdet_xtx_grad
+        Same tree structure as penalty_tree, with leaves of shape (K_j,).
+        Entry k for term j is lambda_jk * trace(C_j.T @ S_jk @ C_j),
+        where C_j is the term's row slice of cov_factor. The caller applies the
+        factors of 0.5 to both returned contributions.
+
+    Notes
+    -----
+    Each penalty is nonzero only on its term's coefficients. So each product
+    uses only the term's rows of beta_hat and cov_factor and the (Q_j, Q_j)
+    penalty, not a zero-padded (P, P) penalty. Terms with equal
+    penalty counts and block sizes are stacked and processed with vmap.
+    C_j @ C_j.T is computed once per term and reused for all K_j penalties of
+    the term. The trace then uses trace(C_j.T @ S_jk @ C_j) = sum(S_jk * (C_j @ C_j.T)),
+    which holds because C_j @ C_j.T is symmetric. No (M, M) matrix is formed.
     """
     if not isinstance(apply_identifiability, tuple):
         raise TypeError("apply_identifiability has to be a tuple")
 
     penalty_flat, structure = jtu.tree_flatten(penalty_tree)
-    scaled = [fn(p) for fn, p in zip(apply_identifiability, penalty_flat, strict=True)]
-    lams = jtu.tree_leaves(lams)
+    S_per_term = [
+        fn(p) for fn, p in zip(apply_identifiability, penalty_flat, strict=True)
+    ]
+    lams_per_term = jtu.tree_leaves(lams)
 
-    n = len(scaled)
-    # diagonal column offset of each block in the intercept-shifted coef space
-    offsets = []
-    acc = 1  # shift_by=1 skips the unpenalized intercept column
-    for sp in scaled:
-        offsets.append(acc)
-        acc += int(sp.shape[-1])
+    # term j has coefficients term_boundaries[j] to term_boundaries[j + 1]. index 0 is the intercept.
+    block_sizes = [p.shape[-1] for p in S_per_term]
+    term_boundaries = np.cumsum([1, *block_sizes])
+    term_coef_indices = [
+        np.arange(start, stop)
+        for start, stop in zip(term_boundaries[:-1], term_boundaries[1:])
+    ]
 
-    # group terms by (n_penalties_per_term, block_size) -> one vmap per group
-    groups: dict = defaultdict(list)
-    for j, sp in enumerate(scaled):
-        groups[(int(sp.shape[0]), int(sp.shape[-1]))].append(j)
+    # group terms by penalty shape (K, Q, Q) -> one vmap per group
+    groups = defaultdict(list)
+    for j, S_j in enumerate(S_per_term):
+        groups[S_j.shape].append(j)
 
-    def _per_term(pen, comp_slice, comp_y1_slice, lam):
-        # pen (k,q,q)  comp_slice (q,m)  comp_y1_slice (q,)  lam (k,) -> (k,),(k,)
-        rss = lam * jnp.einsum("kij,i,j->k", pen, comp_y1_slice, comp_y1_slice)
-        # Reuse the local covariance block across this term's penalties.
-        covariance = jnp.einsum("im,jm->ij", comp_slice, comp_slice)
-        ld = lam * jnp.einsum("kij,ij->k", pen, covariance)
-        return rss, ld
+    def _per_term_grad(S_j, C_j, beta_hat_j, lam_j):
+        # rss_grad[k] = lam_j[k] * beta_hat_j.T @ S_j[k] @ beta_hat_j
+        rss_grad = lam_j * jnp.einsum("kij,i,j->k", S_j, beta_hat_j, beta_hat_j)
+        # reuse the term's covariance block across all its penalties
+        covariance = C_j @ C_j.T
+        # logdet_xtx_grad[k] = lam_j[k] * jnp.trace(C_j.T @ S_j[k] @ C_j)
+        logdet_xtx_grad = lam_j * jnp.einsum("kij,ij->k", S_j, covariance)
 
-    rss_out: list = [None] * n
-    ld_out: list = [None] * n
-    for (_k, q), members in groups.items():
-        rows = np.stack([np.arange(offsets[j], offsets[j] + q) for j in members])
-        comp_g = comp[rows]  # (G, q, m)
-        comp_y1_g = comp_y1[rows]  # (G, q)
-        pen_g = jnp.stack([scaled[j] for j in members])  # (G, k, q, q)
-        lam_g = jnp.stack([lams[j] for j in members])  # (G, k)
-        rss_b, ld_b = jax.vmap(_per_term)(pen_g, comp_g, comp_y1_g, lam_g)
-        for i, j in enumerate(members):
-            rss_out[j] = rss_b[i]
-            ld_out[j] = ld_b[i]
+        return rss_grad, logdet_xtx_grad
+
+    _per_group_grad = jax.vmap(_per_term_grad)
+
+    n_terms = len(S_per_term)
+    rss_grad_leaves = [None] * n_terms
+    logdet_xtx_grad_leaves = [None] * n_terms
+    # shape glossary: G is the number of terms in the group
+    for member_indices in groups.values():
+        group_coef_indices = np.stack([term_coef_indices[j] for j in member_indices])
+        group_C = cov_factor[group_coef_indices]  # (G, Q, M)
+        group_beta_hat = beta_hat[group_coef_indices]  # (G, Q)
+        group_S = jnp.stack([S_per_term[j] for j in member_indices])  # (G, K, Q, Q)
+        group_lams = jnp.stack([lams_per_term[j] for j in member_indices])  # (G, K)
+
+        group_rss_grads, group_logdet_xtx_grads = _per_group_grad(
+            group_S, group_C, group_beta_hat, group_lams
+        )
+
+        # put the terms' gradients in the original order
+        for j, rss_grad, logdet_xtx_grad in zip(
+            member_indices, group_rss_grads, group_logdet_xtx_grads, strict=True
+        ):
+            rss_grad_leaves[j] = rss_grad
+            logdet_xtx_grad_leaves[j] = logdet_xtx_grad
+
     return (
-        jtu.tree_unflatten(structure, rss_out),
-        jtu.tree_unflatten(structure, ld_out),
+        jtu.tree_unflatten(structure, rss_grad_leaves),
+        jtu.tree_unflatten(structure, logdet_xtx_grad_leaves),
     )
 
 
@@ -187,18 +253,21 @@ def _reml_grad_compute_from_states(
     Given states from _compute_reml_and_states, computes three gradient
     contributions per leaf j:
 
-        grad_j = 0.5 * lam_j * (comp @ y1)^T Sj (comp @ y1)   [RSS]
-               + 0.5 * lam_j * tr(comp^T Sj comp)              [log|X'X+Slam|]
+        grad_j = 0.5 * lam_j * beta_hat^T Sj beta_hat          [RSS]
+               + 0.5 * lam_j * tr(cov_factor^T Sj cov_factor)  [log|X'X+Slam|]
                - 0.5 * d log|Slam|_+ / d rho_j                 [log|Slam|]
 
-    where comp = V_T^T * s_inv  and  Mj = comp^T Sj comp.
+    where cov_factor = V_T^T * s_inv and beta_hat = cov_factor @ y1.
     """
-    comp = V_T.T * s_inv  # (n_features, k)
-    comp_y1 = comp @ y1.ravel()  # (n_features,)
+    # cov_factor @ cov_factor.T is the pseudoinverse of X.T @ W @ X + S_lambda,
+    # with small singular directions dropped. With scale phi = 1, it is the
+    # Bayesian posterior covariance of beta at the current lambda and IRLS weights.
+    cov_factor = V_T.T * s_inv  # (P, M)
+    beta_hat = cov_factor @ y1.ravel()  # estimate of beta for the current lambda, (P,)
 
     lams = jtu.tree_map(jnp.exp, regularization_strength)
-    rss_grad, logdet_xtx_grad = _reml_grad_blocks_sliced(
-        penalty_tree, apply_identifiability, comp, comp_y1, lams
+    rss_grad, logdet_xtx_grad = _reml_grad_blocks(
+        penalty_tree, apply_identifiability, cov_factor, beta_hat, lams
     )
 
     return jtu.tree_map(
