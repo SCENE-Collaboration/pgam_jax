@@ -146,13 +146,10 @@ def _reml_grad_blocks_sliced(penalty_tree, apply_identifiability, comp, comp_y1,
 
     def _per_term(pen, comp_slice, comp_y1_slice, lam):
         # pen (k,q,q)  comp_slice (q,m)  comp_y1_slice (q,)  lam (k,) -> (k,),(k,)
-        hi = jax.lax.Precision.HIGHEST
-        rss = lam * jnp.einsum(
-            "kij,i,j->k", pen, comp_y1_slice, comp_y1_slice, precision=hi
-        )
+        rss = lam * jnp.einsum("kij,i,j->k", pen, comp_y1_slice, comp_y1_slice)
         # Reuse the local covariance block across this term's penalties.
-        covariance = jnp.einsum("im,jm->ij", comp_slice, comp_slice, precision=hi)
-        ld = lam * jnp.einsum("kij,ij->k", pen, covariance, precision=hi)
+        covariance = jnp.einsum("im,jm->ij", comp_slice, comp_slice)
+        ld = lam * jnp.einsum("kij,ij->k", pen, covariance)
         return rss, ld
 
     rss_out: list = [None] * n
