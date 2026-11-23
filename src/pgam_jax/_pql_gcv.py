@@ -147,6 +147,9 @@ def gcv_compute_factory(
             )
         )
 
+        # TODO: Save only what _gcv_compute_bwd uses. The backward pass never
+        # used gcv, trA, Ay, square_s_inv, X or R. Q is saved twice, as Q_ and
+        # as the input Q.
         # Save inputs for backward (must be JAX types only)
         return gcv, (
             gcv,
