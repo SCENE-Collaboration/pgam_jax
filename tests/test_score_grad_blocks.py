@@ -1,18 +1,21 @@
-"""Independent dense checks for term-local REML gradient contractions."""
+"""Dense reference checks for the per-term gradient blocks of PQL-REML and GCV."""
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from pgam_jax._pql_reml import _reml_grad_blocks
+from pgam_jax._score_fn_grad_helper import _score_grad_blocks
 from pgam_jax.penalty_utils import DROP_LAST_ROW_COL, IDENTITY
 
 
 @pytest.mark.parametrize("n_columns", [1, 3, 13])
 @pytest.mark.parametrize("mixed_identifiability", [False, True])
-def test_reml_blocks_match_dense(n_columns, mixed_identifiability):
-    """Check grouping, offsets, multiple penalties, and the returned lists."""
+def test_score_blocks_match_dense(n_columns, mixed_identifiability):
+    """
+    Check grouping, offsets, multiple penalties, separate left and right
+    vectors, and the returned lists.
+    """
     rng = np.random.default_rng(12)
     shapes = [(2, 4), (1, 2), (2, 4), (3, 3)]
     penalties = []
@@ -24,26 +27,27 @@ def test_reml_blocks_match_dense(n_columns, mixed_identifiability):
         ids = (IDENTITY,) * len(penalties)
     local = [fn(p) for fn, p in zip(ids, penalties, strict=True)]
     size = 1 + sum(p.shape[-1] for p in local)
-    cov_factor = jnp.asarray(rng.normal(size=(size, n_columns)))
-    beta = cov_factor @ jnp.asarray(rng.normal(size=n_columns))
+    trace_factor = jnp.asarray(rng.normal(size=(size, n_columns)))
+    left = jnp.asarray(rng.normal(size=size))
+    beta = trace_factor @ jnp.asarray(rng.normal(size=n_columns))
     lams = [jnp.exp(jnp.asarray(rng.uniform(-4, 4, k))) for k, _ in shapes]
 
-    rss, ld = jax.jit(_reml_grad_blocks, static_argnums=1)(
-        penalties, ids, cov_factor, beta, lams
+    bilinear, trace = jax.jit(_score_grad_blocks, static_argnums=1)(
+        penalties, ids, trace_factor, left, beta, lams
     )
-    assert jax.tree_util.tree_structure(rss) == jax.tree_util.tree_structure(lams)
-    assert jax.tree_util.tree_structure(ld) == jax.tree_util.tree_structure(lams)
+    assert jax.tree_util.tree_structure(bilinear) == jax.tree_util.tree_structure(lams)
+    assert jax.tree_util.tree_structure(trace) == jax.tree_util.tree_structure(lams)
     offset = 1
-    for s, lam, rss_j, ld_j in zip(local, lams, rss, ld, strict=True):
+    for s, lam, bilinear_j, trace_j in zip(local, lams, bilinear, trace, strict=True):
         q = s.shape[-1]
         full = np.zeros((s.shape[0], size, size))
         full[:, offset : offset + q, offset : offset + q] = s
-        rss_ref = np.asarray(lam) * np.einsum("i,kij,j->k", beta, full, beta)
-        ld_ref = np.asarray(lam) * np.einsum(
-            "ia,kij,ja->k", cov_factor, full, cov_factor
+        bilinear_ref = np.asarray(lam) * np.einsum("i,kij,j->k", left, full, beta)
+        trace_ref = np.asarray(lam) * np.einsum(
+            "ia,kij,ja->k", trace_factor, full, trace_factor
         )
-        np.testing.assert_allclose(rss_j, rss_ref, rtol=2e-13, atol=1e-12)
-        np.testing.assert_allclose(ld_j, ld_ref, rtol=2e-13, atol=1e-12)
+        np.testing.assert_allclose(bilinear_j, bilinear_ref, rtol=2e-13, atol=1e-12)
+        np.testing.assert_allclose(trace_j, trace_ref, rtol=2e-13, atol=1e-12)
         offset += q
 
 
@@ -55,13 +59,15 @@ def test_reml_blocks_match_dense(n_columns, mixed_identifiability):
         (list, list, 1, ValueError, "one entry per term"),
     ],
 )
-def test_reml_blocks_reject_bad_containers(
+def test_score_blocks_reject_bad_containers(
     penalties_type, lams_type, n_lams, error, match
 ):
     """Check that non-list inputs and a lams length mismatch raise."""
     penalties = penalties_type(jnp.eye(3)[None] for _ in range(2))
     lams = lams_type(jnp.ones(1) for _ in range(n_lams))
-    cov_factor = jnp.ones((7, 7))
+    trace_factor = jnp.ones((7, 7))
     beta = jnp.ones(7)
     with pytest.raises(error, match=match):
-        _reml_grad_blocks(penalties, (IDENTITY, IDENTITY), cov_factor, beta, lams)
+        _score_grad_blocks(
+            penalties, (IDENTITY, IDENTITY), trace_factor, beta, beta, lams
+        )
