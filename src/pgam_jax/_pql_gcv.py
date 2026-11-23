@@ -56,20 +56,6 @@ def _compute_gcv_and_states(
     return gcv, alpha, delta, n_obs, U1, V_T, Q, trA, Ay, s_inv, square_s_inv
 
 
-def symm_mult(sym_mat, factor):
-    return jnp.squeeze(
-        jnp.dot(
-            jnp.dot(factor.T, sym_mat, precision=jax.lax.Precision.HIGHEST),
-            factor,
-            precision=jax.lax.Precision.HIGHEST,
-        )
-    )
-
-
-_vmap_symm_mult = jax.vmap(symm_mult, in_axes=(0, None), out_axes=0)
-_vmap_trace = jax.vmap(jnp.linalg.trace, in_axes=0, out_axes=0)
-
-
 @partial(jax.jit, static_argnames=("apply_identifiability", "gamma"))
 def _gcv_grad_compute_from_states(
     regularization_strength,
