@@ -40,7 +40,10 @@ from ._nan_policy import (
     kept_rows_for_fit,
     validate_nan_handling,
 )
-from ._nemos_compat import initialize_intercept_matching_mean_rate
+from ._nemos_compat import (
+    initialize_intercept_matching_mean_rate,
+    use_direct_convolution,
+)
 from ._p_values import weighted_chisq_pval
 from ._penalty_handler import PenaltyHandler
 from ._pql_gcv import gcv_compute_factory
@@ -680,6 +683,7 @@ class GAM:
         Return the raw design and its layout without caching fitted state.
         With no response, column counts use only the design NaN policy.
         """
+        use_direct_convolution(self.basis)
         self.basis.setup_basis(*inputs)
         # Evaluate the basis once. Detection needs the full-width blocks, and
         # the design is those same blocks with columns removed.

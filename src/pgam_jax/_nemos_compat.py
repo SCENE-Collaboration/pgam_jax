@@ -1,9 +1,12 @@
 """Compatibility shims for differences across supported nemos versions."""
 
 import inspect
+import os
+import warnings
 
 import jax.numpy as jnp
 import nemos
+from nemos.convolve import create_convolutional_predictor
 from nemos.glm.initialize_parameters import (
     initialize_intercept_matching_mean_rate as _nemos_init_intercept,
 )
@@ -50,3 +53,48 @@ def initialize_intercept_matching_mean_rate(
     return _nemos_init_intercept(
         observation_model.default_inverse_link_function, y=y, **kwargs
     )
+
+
+def use_direct_convolution(basis) -> None:
+    """
+    Make every convolutional component of ``basis`` use direct convolution.
+
+    nemos 0.2.10 added an FFT path that it selects on CPU when
+    window_size > 5 * log2(n_samples). On that path, one NaN in the input makes
+    every output row NaN, which differs from the direct convolution path.
+    Additionally, exact zeros become round-off values, which can lead to
+    column-masking not being applied columns with no data.
+
+    This sets ``use_fft=False`` where ``use_fft`` is not set or is None.
+    If the user set ``use_fft=True``, it is kept and a warning is given.
+    Older nemos versions have no FFT path, and then this function does nothing.
+    """
+    if "use_fft" not in inspect.signature(create_convolutional_predictor).parameters:
+        return
+
+    for leaf in basis._iterate_over_components():
+        if not hasattr(leaf, "conv_kwargs"):
+            continue
+
+        use_fft = leaf.conv_kwargs.get("use_fft")
+        match use_fft:
+            case None:
+                leaf.conv_kwargs = {**leaf.conv_kwargs, "use_fft": False}
+            case True:
+                warnings.warn(
+                    f"Basis {leaf.label!r} sets use_fft=True. On the FFT path, nemos "
+                    "makes every output row NaN if the input contains a NaN, and "
+                    "gives round-off values instead of exact zeros. Exact zeros "
+                    "matter for drop_empty_columns. Remove use_fft or set "
+                    "use_fft=False to use direct convolution.",
+                    UserWarning,
+                    # Point at the user's call. The depth differs for fit and concurvity.
+                    skip_file_prefixes=(os.path.dirname(__file__),),
+                )
+            case False:
+                pass
+            case _:
+                raise ValueError(
+                    f"Basis {leaf.label!r} has use_fft={use_fft!r}. "
+                    "Expected True, False, or None."
+                )
