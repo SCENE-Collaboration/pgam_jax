@@ -10,6 +10,7 @@ from ._laplace_reml_vbeta import vbeta_and_logdet
 from ._pirls_weights import _make_w_fn, small_h
 
 
+# TODO: Use per-term penalties as _score_grad_blocks does.
 def laplace_reml(
     beta_hat: jnp.ndarray,
     X: jnp.ndarray,

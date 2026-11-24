@@ -7,9 +7,10 @@ import jax.numpy as jnp
 import jax.tree_util as jtu
 from numpy.typing import NDArray
 
-from ._pql_gcv import _vmap_symm_mult, _vmap_trace, _vmap_where
+from ._pql_gcv import _vmap_where
+from ._score_fn_grad_helper import _score_grad_blocks
 from ._utils import singular_value_keep_mask
-from .penalty_utils import compute_penalty_blocks, prepend_zeros_for_intercept
+from .penalty_utils import prepend_zeros_for_intercept
 
 
 @partial(
@@ -61,11 +62,13 @@ def _compute_reml_and_states(
     log_det_XtXpSl :
         Scalar log|X'X + S_lam| (stored for diagnostics).
     y1 :
-        Shape (k, 1) — U1ᵀ Qᵀ y, needed for the RSS gradient.
+        Shape (M, 1). U1.T @ Q.T @ y, needed for beta_hat in the gradient.
+        M is the number of singular values of A = [R; sqrt_penalty].
     s_inv :
-        Shape (k,) — masked reciprocal singular values, needed for M_j.
+        Shape (M,). Masked reciprocal singular values, needed for cov_factor.
     V_T :
-        Shape (k, p) — right singular vectors, needed for M_j.
+        Shape (M, P). Right singular vectors of A, needed for cov_factor.
+        P is the number of coefficients, including the intercept.
     log_det_sl_grads :
         Pytree of per-block log|S_lam|_+ gradients (same structure as
         regularization_strength), computed alongside the log-det in the
@@ -91,7 +94,7 @@ def _compute_reml_and_states(
 
     # --- REML RSS = ||y||^2 - ||U1^T Q^T y||^2 ---
     y_obs = y[:n_obs].reshape(n_obs, -1)
-    y1 = U1.T @ (Q.T @ y_obs)  # (k, 1)
+    y1 = U1.T @ (Q.T @ y_obs)  # (M, 1)
     RSS_reml = jnp.sum(y_obs**2) - jnp.sum(y1**2)
 
     # --- log|X'X + S_lam| = 2 * sum log(s_k) over positive singular values ---
@@ -102,6 +105,9 @@ def _compute_reml_and_states(
     log_dets, log_det_sl_grads = compute_log_det_and_grad(regularization_strength)
     log_det_Sl = jtu.tree_reduce(lambda a, b: a + b, log_dets)
 
+    # TODO: Support fixed or estimated dispersion beyond the current Poisson case.
+    # Update this objective and its custom gradient together. For unknown
+    # dispersion, estimate it during smoothing selection, not only after fitting.
     reml_val = 0.5 * RSS_reml + 0.5 * log_det_XtXpSl - 0.5 * log_det_Sl
 
     return reml_val, RSS_reml, log_det_XtXpSl, y1, s_inv, V_T, log_det_sl_grads, n_obs
@@ -112,13 +118,13 @@ def _compute_reml_and_states(
     static_argnames=("apply_identifiability",),
 )
 def _reml_grad_compute_from_states(
-    regularization_strength: Any,
-    penalty_tree: Any,
+    regularization_strength: list[jax.Array],
+    penalty_tree: list[jax.Array],
     y1: jnp.ndarray,
     s_inv: jnp.ndarray,
     V_T: jnp.ndarray,
-    log_det_sl_grads: Any,
-    apply_identifiability: Callable | None,
+    log_det_sl_grads: list[jax.Array],
+    apply_identifiability: tuple[Callable, ...],
 ):
     """
     Gradient of the REML objective w.r.t. regularization_strength.
@@ -126,34 +132,25 @@ def _reml_grad_compute_from_states(
     Given states from _compute_reml_and_states, computes three gradient
     contributions per leaf j:
 
-        grad_j = 0.5 * lam_j * (comp @ y1)^T Sj (comp @ y1)   [RSS]
-               + 0.5 * lam_j * tr(comp^T Sj comp)              [log|X'X+Slam|]
+        grad_j = 0.5 * lam_j * beta_hat^T Sj beta_hat          [RSS]
+               + 0.5 * lam_j * tr(cov_factor^T Sj cov_factor)  [log|X'X+Slam|]
                - 0.5 * d log|Slam|_+ / d rho_j                 [log|Slam|]
 
-    where comp = V_T^T * s_inv  and  Mj = comp^T Sj comp.
+    where cov_factor = V_T^T * s_inv and beta_hat = cov_factor @ y1.
     """
-    comp = V_T.T * s_inv  # (n_features, k)
-    comp_y1 = comp @ y1.ravel()  # (n_features,)
-
-    blocks = compute_penalty_blocks(
-        penalty_tree,
-        apply_identifiability=apply_identifiability,
-        shift_by=1,
-    )
+    # cov_factor @ cov_factor.T is the pseudoinverse of X.T @ W @ X + S_lambda,
+    # with small singular directions dropped. With scale phi = 1, it is the
+    # Bayesian posterior covariance of beta at the current lambda and IRLS weights.
+    cov_factor = V_T.T * s_inv  # (P, M)
+    beta_hat = cov_factor @ y1.ravel()  # estimate of beta for the current lambda, (P,)
 
     lams = jtu.tree_map(jnp.exp, regularization_strength)
-
-    # lam_j * (comp @ y1)^T Sj (comp @ y1)
-    rss_grad = jtu.tree_map(
-        lambda s_block, lam: lam * _vmap_symm_mult(s_block, comp_y1),
-        blocks,
-        lams,
-    )
-
-    # lam_j * tr(Mj) = lam_j * tr(comp^T Sj comp)
-    logdet_xtx_grad = jtu.tree_map(
-        lambda s_block, lam: lam * _vmap_trace(_vmap_symm_mult(s_block, comp)),
-        blocks,
+    rss_grad, logdet_xtx_grad = _score_grad_blocks(
+        penalty_tree,
+        apply_identifiability,
+        cov_factor,
+        beta_hat,
+        beta_hat,
         lams,
     )
 
@@ -165,11 +162,13 @@ def _reml_grad_compute_from_states(
     )
 
 
+# TODO: Remove apply_identifiability_columns. It is unused here and in
+# gcv_compute_factory. Callers: gam.py and tests/test_pql_reml.py.
 def reml_compute_factory(
     compute_sqrt: Callable,
     compute_log_det_and_grad: Callable,
-    apply_identifiability_columns: Callable | None,
-    apply_identifiability: Callable | None,
+    apply_identifiability_columns: tuple[Callable, ...],
+    apply_identifiability: tuple[Callable, ...],
 ):
     """
     Build a differentiable REML objective with a custom VJP.

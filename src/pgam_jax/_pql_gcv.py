@@ -5,10 +5,12 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
+from nemos.tree_utils import tree_scalar_mul
 from numpy.typing import NDArray
 
+from ._score_fn_grad_helper import _score_grad_blocks
 from ._utils import singular_value_keep_mask
-from .penalty_utils import compute_penalty_blocks, prepend_zeros_for_intercept
+from .penalty_utils import prepend_zeros_for_intercept
 
 _vmap_where = jax.vmap(jnp.where, (None, None, 0), out_axes=0)
 
@@ -54,20 +56,6 @@ def _compute_gcv_and_states(
     return gcv, alpha, delta, n_obs, U1, V_T, Q, trA, Ay, s_inv, square_s_inv
 
 
-def symm_mult(sym_mat, factor):
-    return jnp.squeeze(
-        jnp.dot(
-            jnp.dot(factor.T, sym_mat, precision=jax.lax.Precision.HIGHEST),
-            factor,
-            precision=jax.lax.Precision.HIGHEST,
-        )
-    )
-
-
-_vmap_symm_mult = jax.vmap(symm_mult, in_axes=(0, None), out_axes=0)
-_vmap_trace = jax.vmap(jnp.linalg.trace, in_axes=0, out_axes=0)
-
-
 @partial(jax.jit, static_argnames=("apply_identifiability", "gamma"))
 def _gcv_grad_compute_from_states(
     regularization_strength,
@@ -84,27 +72,25 @@ def _gcv_grad_compute_from_states(
     apply_identifiability,
 ):
     # compute useful vector
-    y1 = U1.T @ (Q.T @ y)
-    UTU = U1.T @ U1
+    qt_y = (Q.T @ y).ravel()
+    y1 = U1.T @ qt_y
 
-    blocks = compute_penalty_blocks(
-        penalty_tree,
-        apply_identifiability=apply_identifiability,
-        shift_by=1,
-    )
+    cov_factor = V_T.T * s_inv
+    D = cov_factor @ U1.T
+    beta_hat = cov_factor @ y1  # estimate of beta for the current lambda, (P,)
+    u = D @ (qt_y - U1 @ y1)
 
-    comp = V_T.T * s_inv
-    M = jtu.tree_map(lambda x: _vmap_symm_mult(x, comp), blocks)
-    F = jtu.tree_map(lambda x: jnp.dot(x, UTU, precision=jax.lax.Precision.HIGHEST), M)
     lams = jtu.tree_map(jnp.exp, regularization_strength)
-    alpha_grad = jtu.tree_map(
-        lambda x, y: y * _vmap_symm_mult(x, y1),
-        jtu.tree_map(lambda x, y: 2 * x - y - jnp.transpose(y, (0, 2, 1)), M, F),
+    bilinear_term, trace_term = _score_grad_blocks(
+        penalty_tree,
+        apply_identifiability,
+        D,
+        u,
+        beta_hat,
         lams,
     )
-    delta_grad = jtu.tree_map(
-        lambda x, y: jnp.squeeze(gamma * x * _vmap_trace(y)), lams, F
-    )
+    alpha_grad = tree_scalar_mul(2, bilinear_term)
+    delta_grad = tree_scalar_mul(gamma, trace_term)
     gcv_grad = jtu.tree_map(
         lambda x, y: (n_obs / delta**2) * x - 2 * n_obs * alpha / delta**3 * y,
         alpha_grad,
@@ -161,6 +147,9 @@ def gcv_compute_factory(
             )
         )
 
+        # TODO: Save only what _gcv_compute_bwd uses. The backward pass never
+        # used gcv, trA, Ay, square_s_inv, X or R. Q is saved twice, as Q_ and
+        # as the input Q.
         # Save inputs for backward (must be JAX types only)
         return gcv, (
             gcv,
