@@ -17,10 +17,7 @@ from nemos.basis import (
     CyclicBSplineEval,
     MultiplicativeBasis,
 )
-from nemos.glm.initialize_parameters import (
-    INVERSE_FUNCS,
-    initialize_intercept_matching_mean_rate,
-)
+from nemos.glm.initialize_parameters import INVERSE_FUNCS
 from nemos.observation_models import Observations, PoissonObservations
 from nemos.type_casting import all_same_time_info
 from nemos.validation import check_same_shape_on_axis
@@ -43,6 +40,7 @@ from ._nan_policy import (
     kept_rows_for_fit,
     validate_nan_handling,
 )
+from ._nemos_compat import initialize_intercept_matching_mean_rate
 from ._p_values import weighted_chisq_pval
 from ._penalty_handler import PenaltyHandler
 from ._pql_gcv import gcv_compute_factory
@@ -417,7 +415,7 @@ class GAM:
         # can stall at a garbage intercept (-> exp(eta) = 0 -> NaNs downstream).
         # link(mean) starts at the intercept-only optimum.
         intercept = initialize_intercept_matching_mean_rate(
-            self.observation_model.default_inverse_link_function, y
+            self.observation_model, X, y
         )
 
         return (coef, intercept)
