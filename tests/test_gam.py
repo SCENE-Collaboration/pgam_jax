@@ -1,13 +1,23 @@
+import inspect
+
 import jax
 import jax.numpy as jnp
 import nemos as nmo
 import numpy as np
 import pytest
+from nemos.glm.initialize_parameters import initialize_intercept_matching_mean_rate
 from nemos.observation_models import GammaObservations
 
 from pgam_jax import GAM
 
 jax.config.update("jax_enable_x64", True)
+
+# nemos 0.2.10 added ``rate_range`` (nemos #635). With it, nemos moves a mean on the
+# boundary of the valid range inside the range, instead of raising.
+NEMOS_SHIFTS_BOUNDARY_MEAN = (
+    "rate_range"
+    in inspect.signature(initialize_intercept_matching_mean_rate).parameters
+)
 
 
 def _basis():
@@ -277,6 +287,9 @@ def test_initialize_params_warm_starts_intercept_at_link_of_mean():
     np.testing.assert_allclose(np.asarray(intercept), np.log(y.mean()), rtol=1e-6)
 
 
+@pytest.mark.skipif(
+    NEMOS_SHIFTS_BOUNDARY_MEAN, reason="nemos >= 0.2.10 shifts boundary means"
+)
 def test_initialize_params_raises_for_degenerate_response():
     """All-zero counts -> log(mean) = -inf -> raise ValueError"""
     model = GAM(_basis())
@@ -285,6 +298,25 @@ def test_initialize_params_raises_for_degenerate_response():
 
     with pytest.raises(ValueError, match="Failed to initialize"):
         _, intercept = model.initialize_params(X, y)
+
+
+@pytest.mark.skipif(
+    not NEMOS_SHIFTS_BOUNDARY_MEAN, reason="nemos <= 0.2.9 has no rate_range"
+)
+def test_initialize_params_shifts_degenerate_response():
+    """
+    All-zero counts: nemos moves the mean from 0 to 0.5 / n and warns.
+
+    The intercept is then log(0.5 / n), which is finite.
+    """
+    model = GAM(_basis())
+    n = 500
+    y = np.zeros(n)
+    X = np.zeros((n, 5))
+
+    with pytest.warns(UserWarning, match="boundary mean"):
+        _, intercept = model.initialize_params(X, y)
+    np.testing.assert_allclose(np.asarray(intercept), np.log(0.5 / n), rtol=1e-10)
 
 
 def test_use_glm_init_reaches_same_solution():

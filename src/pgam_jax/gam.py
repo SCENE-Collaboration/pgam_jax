@@ -17,10 +17,7 @@ from nemos.basis import (
     CyclicBSplineEval,
     MultiplicativeBasis,
 )
-from nemos.glm.initialize_parameters import (
-    INVERSE_FUNCS,
-    initialize_intercept_matching_mean_rate,
-)
+from nemos.glm.initialize_parameters import INVERSE_FUNCS
 from nemos.observation_models import Observations, PoissonObservations
 from nemos.type_casting import all_same_time_info
 from nemos.validation import check_same_shape_on_axis
@@ -42,6 +39,10 @@ from ._nan_policy import (
     get_valid_y_rows,
     kept_rows_for_fit,
     validate_nan_handling,
+)
+from ._nemos_compat import (
+    initialize_intercept_matching_mean_rate,
+    use_direct_convolution,
 )
 from ._p_values import weighted_chisq_pval
 from ._penalty_handler import PenaltyHandler
@@ -417,7 +418,7 @@ class GAM:
         # can stall at a garbage intercept (-> exp(eta) = 0 -> NaNs downstream).
         # link(mean) starts at the intercept-only optimum.
         intercept = initialize_intercept_matching_mean_rate(
-            self.observation_model.default_inverse_link_function, y
+            self.observation_model, X, y
         )
 
         return (coef, intercept)
@@ -682,6 +683,7 @@ class GAM:
         Return the raw design and its layout without caching fitted state.
         With no response, column counts use only the design NaN policy.
         """
+        use_direct_convolution(self.basis)
         self.basis.setup_basis(*inputs)
         # Evaluate the basis once. Detection needs the full-width blocks, and
         # the design is those same blocks with columns removed.
